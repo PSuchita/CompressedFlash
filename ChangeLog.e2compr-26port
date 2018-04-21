@@ -1,0 +1,453 @@
+
+e2compr - Released under the GPL V 2 license.
+
+
+Installation:
+=============
+
+1. gunzip:
+	> gunzip  linux-3.1-rc3-e2c-0.4.59.patch.gz
+
+2. change to you kernel directory
+
+3. make clean:
+	> make clean
+
+3. patch:
+	> patch -p1 <  ../patch/to/patch/linux-3.4-e2c-0.4.59.patch
+
+   see if any rejects occured:
+	> find | grep .rej
+	
+   WARNING: All rejects must be fixed manually!
+
+4. config:
+	> make oldconfig
+	> make menuconfig
+   Now enable at least the ext2-compression feature:
+   Filesystems:   
+	     <*> Second extended fs support                                     
+         [ ]   Ext2 extended attributes                                     
+         [ ]   Ext2 execute in place support                                
+         [*]   Ext2 file compression (DANGEROUS)                          
+                 Ext2 file compression options  ---> 
+
+5. make:
+	> make 
+
+
+Building a patch:
+=================
+
+files.txt:
+
+fs/ext2/ChangeLog.e2compr-26port
+Documentation/filesystems/e2compress.txt
+fs/ext2/Readme.e2compr
+fs/Kconfig
+include/linux/ext2_fs_c.h
+fs/ext2/Makefile
+fs/ext2/compress.c
+fs/ext2/e2zlib.c
+fs/ext2/adler32.c
+fs/ext2/super.c
+fs/ext2/ialloc.c
+fs/ext2/balloc.c
+fs/ext2/inode.c
+fs/ext2/file.c
+fs/ext2/ioctl.c
+fs/ext2/ext2.h
+include/linux/ext2_fs.h
+fs/fcntl.c
+mm/truncate.c
+mm/swapfile.c
+mm/filemap.c
+mm/page_alloc.c
+
+
+cat  files.txt | xargs -n1 -I '{}' diff -pruNbB linux-3.4/'{}' linux-3.4-e2c/'{}' > ./linux-3.1-e2c-0.4.59.patch
+
+
+Changelog:
+==========
+1 May 2012
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* released version 0.4.59 for kernel 3.4
+        * compress.c:
+		- ext2_get_cluster_pages()
+		  Removed dead code for releasing cached pages using
+                  page_cache_release() and pagevec_free(). 
+		  Releasing cached pages could not have worked since
+		  porting from 2.6.22 to 2.6.25 (April 2008)
+        * mm/truncate.c:
+		- fixes broken files on non ext2 partitions
+		- moved conditional truncate from truncate_pagecache()
+		  to vmtruncate() as suggested by Andreas Flick 
+        * made patch even smaller
+
+25 August 2011
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* released version 0.4.58 for kernel 3.1
+	* file.c: i_alloc_sem was removed. I am not sure if only holding i_mutex 
+		will be enough. See http://patchwork.ozlabs.org/patch/101859/.
+  		In ext2_file_write() I replaced:
+
+			mutex_lock(&inode->i_mutex);
+		- 	down_read(&inode->i_alloc_sem);
+		+ 	atomic_inc(&inode->i_dio_count);
+
+		- 	up_read(&inode->i_alloc_sem);
+		+	inode_dio_done(inode);
+			mutex_unlock(&inode->i_mutex);
+
+		The main prupose of i_dio_count is blocking vmtruncate_range()
+		as long as the i_dio_count is greater than 0. In other words, 
+		all direct io must be completed before truncating is allowed.
+		
+	* file.c: generic_osync_inode was removed from mm - added functionality to 
+		file.c as ex_generic_osync_inode()
+	* file.c: changed: &inode_lock to &inode->i_lock
+	* ext2_warning() replaced by ext2_msg()
+	* compress.c: vfs_dq_init(inode) replaced by dquot_initialize(inode)
+	* compress.c: ext2_truncate(inode) replaced by 
+		ext2_truncate_blocks(inode, inode->i_size) which looks like
+		exactly the same!
+	* inode.c: dentry->d_lock now seems to need 
+		spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED) held.
+	* compress.c, inode.c: added might_schedule() before wait_on_buffer()
+		statements to assure we are not atomic at this point.
+	* truncate.c: removed patch from memory.c and moved it to truncate.c
+		as surrounding kernel code also moved there. vmtruncate() was
+		split in truncate_setsize() and truncate_pagecache() with kernel 3.1
+
+
+10 August 2009
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* released version 0.4.58
+	* merged assert.h and debug.h into ext2_fs_c.h
+	* merged NDEBUG into EXT2_COMPR_DEBUG
+	* disabled adler cheksums on "read" if not defined EXT2_COMPR_DEBUG.
+	* merged none.c into compress.c
+	* inserted multiple defines "CONFIG_EXT2_COMPRESS" to allow disabling 
+	  of ext2compression with patched sources.
+	* re-inserted EXPORT_SYMBOL(__pagevec_free) to support ext2 as module
+		
+05 August 2009
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* released version 0.4.57
+	* ported to kernel 2.6.30:
+		inode.c: after fix of generic ext2 ext2_get_blocks() needed to remove bforget.
+	* integrated SMP from version 0.4.56
+	* per CPU one separate read and one separate write working area
+	* removed all external compression codecs
+	* removed "verify compression" (never helped to find a bug anyway)	
+	* Lindent'ed all source and header files
+
+01 August 2008
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* released version 0.4.55
+	* complete code cleanup
+	* changed policy to ALWAYS_LOCKING pages in do_generic_mapping_read()
+	  => completely removed PG_Compr-Flag now!	
+
+31 July 2008
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* released version 0.4.54
+	* fixes rare himem bug: only occures if page > cluster in inode.c/readpage()
+	* fixes rare readpage bug in mm/filemap.c/do_generic_mapping_read():
+		PG_Compr flags dissallow reading a page while de/compressing.
+		Setting and unsetting it requires the page lock, with one exception
+		do_generic_mapping_read() in filemap.c. This is done because of performance 
+		reasons. Anyway, a simultaneous call of do_generic_mapping_read() for the SAME
+		page might break the PG_Compr-Mimic.
+
+		Solutions: Always lock any page before reading OR second(n-th) call of
+			   do_generic_mapping_read() busy waits until first is done.
+			   Default is busy wait now, ALWAYS_LOCK implemented as option via define.
+
+25 June 2008
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* released version 0.4.53
+	* fixes himem bug: unmapped block in ext2_decompress_cluster()
+	* fixes bdev bug: ext2_get_block() must be called for every block
+	  which cause ooops because of bdev == NULL. ext2_get_block() will
+	  set the correct bdev and the correct blocknumber of the block.
+	  
+	  NEVER assign bdev manually, because the blocknumber might be random then:
+	  	"block->b_bdev = something" (DON'T!)
+		
+	  ALWAYS use:
+	  	if (!buffer_mapped(block)) || (block->b_bdev == NULL)
+			ext2_get_block()
+	  
+	  Bdev bug is closely related to file holes (empty block in a file).
+	  If compressed data will be written to a former hole, then
+	  usually ext2_get_block() must be called with create.
+	  	ext2_get_block( , , , 1 /*create*/).
+
+	* fixed missing include in xattr.h
+	* EXT2_COMPRBLK might be removed during compression if a cluster 
+	  doesn't compress. During compression we re-raise EXT2_COMPRBLK
+	  flag after every cluster now.
+	* added missing export of __pagevec_free to (mm/page_alloc.c)
+	* deny O_DIRECT access mode after open of a file using fcntl()
+	  (in fs/fcntl.c).
+	* file.c: 
+	  Replaced ext2_filew_write() to use kernels generic
+          do_sync_write(). Writing on compressed files calls 
+          ext2_filew_write():
+		- divide write range into clusters
+		- ext2_decompress_cluster (if needed)
+		- do_sync_write()
+ 		- ext2_compress_cluster (if needed)
+	* inode.c:
+	  ext2_writepage()/ext2_writepages() usually writes back
+          dirty pages of an inode. They reside in the kernels page cache.
+	  This pages might e.g. be written/dirtied by a mmap()-ped file.
+	  Also generic_file_aio_write() uses ext2_writepage() finally.
+	  I don't see how the ext2_writepage() would handle compressed 
+          files, so I re-inserted and re-wrote this part of old 2.4 code.
+ 	  Don't know if this code (USE_WRITEPAGE) is needed at all.
+          So I leave it disabled by default. Enabled it might
+          leave compressed files with compression ratio of 100%. 
+	  Don't use yet!	  
+
+17 April 2008
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* first patch for kernel 2.6.25 released
+
+20 March 2008
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* version 0.4.52: EXT2_COMPRESS_WHEN_CLU didn't work. this
+	  feature enables compression during file write.
+
+15 Oct 2007
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* First offical Sourceforge release as version 0.4.51
+	* TODO: figure out what is necessary to enable swap 
+	  suppport for e2compr again (see mm/swapfile.c).	  
+
+27 Sep 2007
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* System stalled with a lot of I/O during de-compression of
+	  USB-Sticks, too. I replaced mark_buffer_dirty 
+	  with set_buffer_dirty. This achieves that ONLY the buffers 
+	  and not the pages are marked. Then I write back the 
+	  buffers with ll_rw_block() at the end of 
+	  ext2_decompress_cluster() and ext2_decompress_pages(). 
+	  This should stop flooding the system with dirty pages. 
+	  Because now every routine waits for its newly dirtied buffers.	  
+	  My system with 128MB of RAM is responding much more better during
+	  compression/decompression now. Desompression also seems
+	  to be a bit faster. 
+	  (this change is active with: #ifndef E2C_GENERIC_OSYNC)  
+
+25 Sep 2007
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* System stalled with a lot of I/O during compression of
+	  USB-Sticks. Seems generic_osync_inode() should not be 
+	  called in ext2_compress_cluster. Therefore I replaced
+	  it with ll_rw_block() to write the modified blocks
+	  directly back to disk. This gave also a ~100% better
+	  performance for compression.
+	
+9 Sep 2007
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	* fixed bdev-bug. this bug appeared primarily when
+	  files contained holes. A page with holes, which 
+	  was dirty caused ext2_get_cluster_blocks [ext2_get_block()]
+	  to create ALL blocks of the page, even if there were holes!
+	  These allocated hole-blocks weren't set to 0 anywhere and
+	  therefore contained invalid data. I changed the
+	  code to never allocate these holes.
+	  
+	* ext2_truncate() added again to ext2_compress_cluster for
+	  uncompressed clusters. Fixes filesize errors reported by 
+	  "e2fsck -f /dev/..."	  
+
+24 Aug 2007
+	Matthias Winkler <matthiaswinkler@users.sourceforge.net>
+	
+	Major changes:	
+	* completly ported inode->i_mutex
+	
+	* clever CONFIG_GZ_HACK to reject "uncompressable" files 
+	  (according to their extension) early. The IOCTL in ioctl.c 
+	  which sets the compression on the file already rejects such 
+	  extensions now.
+	 
+	* new create_empty_buffers_e2c() was necessary, because the
+	  "extra"-pages should NOT have a valid i_mapping! Further the
+	  buffers needed to be initalized right.
+	
+	* proper block initalization (bdev-bug) in:
+	   - create_empty_buffers_e2c()
+	   - ext2_get_cluster_blocks
+	   
+	* in file.c copied:  
+	  ...with one single change at ext2_mapping_read in label page_ok:
+	  A new Page-Flag (page-flags.h) the so called "PG_compr"-Flag is 
+	  checked to assure the corresponding page is not under 
+	  compression/decompression. This was necessary because
+	  generic_mapping_read() doesn't lock() the page in ALL cases!!!
+	  Otherwise the generic_mapping_read() would have to lock EVERY page
+	  in the whole system before returning it....
+	  
+	* Fixed HiMem-Support: Balanced ALL kamp/kunmap calls. Unbalanced
+	  functions cause the system to hang at "kmap_himem()" after some 
+	  time. Can be seen with magic-sysctrl "altgr + prtscr + W".
+	
+	* ext2_decompres_cluster() didn't mark uptodate pages for writeback.
+	  Don't know how this method could EVER have worked...
+	  
+	* ext2_compress_cluster() caused an always increasing amount of dirty-pages
+	  (cat /proc/vmstat) which couldn't be wrote back by sync/umount.
+	  I think this was due the ClearPageDirty at the end of ext2_compress_cluster().
+	  
+	* introduced ext2_get_dcount() to savely determine if a file is really "open"
+	  and to abort compression/decompression in such a case. 
+	  
+	* Removed gzip completely and not working assembler code. Replaced by the
+	  kernels built-in zlib, which is pretty the same code... 
+	
+	* New kernel configuration interface
+	 
+	* Rollback of some unecessary "fixes"...
+	
+	TODO:
+	
+	* HiMem-Support:
+	  One might try to use kmap_atomic instead of kamp in ext2_readpage. kmap_atomic
+	  doesn't block and might speed up the regular page reading. might.		
+	
+20 April 2007
+	Andreas:
+		
+	* Replaced GZIP with zlib of the kernel because the assembly versions of existing
+	  compression modules crashed.
+	  
+	* Replaced gzip with the kernel zlib, which is built-in anyway
+	
+	* Initial HiMem-Support. 
+
+
+06 Mar 2007
+
+	Terry Loveall <loveall@iinet.com>
+
+	* adapted linux-2.6.10-e2compr-0.4.45-alpha0126.diff to 2.6.18.5 kernel
+
+	* replaced most instances of down/up(inode->i_sem) with 
+	  lock/unlock(inode->i_mutex). For exception see file.c, below.
+
+	* made various printk regularizations to uniquely identify each printk
+	  instance. Inserted missing KERN_DEBUG and KERN_WARNING.
+
+	* compress.c:
+	  bug fix: ext2_count_blocks: init head_bh for each iteration.
+	  bug fix: ext2_count_blocks: add set clen=ulen for uncompressable clusters.
+	  bug fix: ext2_compress_cluster: replacement and inlining of an 
+	   invalidate_inode_buffers function to keep root filesystem changes
+	   uptodate on disk (prevents umounting root file system to update).
+	  warning fix: ext2_compress_cluster: various variables initialized.
+	  ext2_compress_cluster: removed #ifdef NDEBUG
+	  bug fix: ext2_compress_cluster: defined maxclus, calculate and set for:
+	  bug fix: ext2_compress_cluster: set filesize for uncompressed clusters.
+	  ext2_cleanup_compressed_inode: changed error message to indicate 'Z'
+	   flag was caused by trying to un/compress already open file.
+	  bug fix: cp to compr dir: Truncate uncompressed files to their
+	   uncompressed length, i.e. force kernel to update inode and sb
+
+	* file.c:
+	  removed file->f_error code since f_error no longer in file struct.
+	  ext2_file_write: changed down/up i_sem to down_read/up_read i_alloc_sem
+
+	* inode.c:
+	  bug fix: ext2_get_block: restored changed: loop to bforget
+
+	* ioctl.c:
+	  ext2_ioctl: scrubbed 'B' flag on file uncompress.
+
+	* match[56]86.S:
+	  made code dependent on #ifdef CONFIG_REGPARM to compile with either
+	  register variable or stack variable parameter passing.
+
+28 Feb 2005
+
+	Yabo Ding <bobfree_cn@yahoo.com.cn>,<yding@wyse.com>
+
+	* Corrected page unlocking in inode.c.
+
+19 Feb 2005
+
+	Paul Whittaker <whitpa@users.sourceforge.net>
+
+	* Added corrections le32_to_cpu in critical areas of compress.c
+	* Optimized function exit code in inode.c.
+
+24 Aug 2004
+Yabo Ding <bobfree_cn@yahoo.com.cn>,<yding@wyse.com>
+
+  compress.c
+*  ext2_decompress_pages()
+     The old code cannot reread data from disk to a changed buffers data pointer in 2.6.x.
+     So, I copy memory data(decompressed) to a temporary buffer;
+     Then reread data(compressed) from disk, and copy to head;
+     Then copy back the memory data from temporary buffer.
+     It seems clumsy, but it works well.
+*  ext2_compress_cluster()
+     Force write to disk.
+
+  inode.c
+*  ext2_writepage()
+     Delete old code. All directly call block_write_full_page() function.
+
+* ../Kconfig
+    Change e2compr config as a submenu config
+
+04 Aug 2004
+
+Paul Whittaker <whitpa@users.sourceforge.net>
+
+* compress.c: replaced mark_buffer_dirty(x,y) with mark_buffer_dirty(x).  I'm
+  still not at all sure that this is sufficient.
+
+03 Aug 2004
+
+Paul Whittaker <whitpa@users.sourceforge.net>
+
+* ../../include/linux/ext2_fs_c.h: added missing prototypes for ext2_iLZRW3A(),
+  ext2_iLZRW3A(), ext2_rLZRW3A().
+
+02 Aug 2004
+
+Paul Whittaker <whitpa@users.sourceforge.net>
+
+* ../../mm/page_alloc.c: added EXPORT_SYMBOL(__pagevec_free).
+
+* ../../include/linux/pagemap.h, ../../mm/filemap.c: removed inline from
+  __grab_cache_page() declarations, added EXPORT_SYMBOL(__grab_cache_page).
+
+* ../../include/linux/mm.h, ../../mm/filemap.c: removed inline from
+  page_waitqueue() declarations, added EXPORT_SYMBOL(page_waitqueue).
+
+* bzip2/{lib_bzip_d,lib_bzip_e}.c, {gzip,lzo,lzrw3a,lzv1}/e2compr*.c:
+  replaced MOD_INC_USE_COUNT and MOD_DEC_USE_COUNT with try_module_get()
+  and module_put() to avoid deprecation and safety warnings.
+
+* lzrw3a/lzrw3a.c: added (UBYTE *) casts to avoid compiler warnings.
+
+* compress.c, inode.c: incorporated Yabo's changes, correcting mistakes in
+  ext2_readpages() in inode.c.
+
+* removed printks for ext2_discard_prealloc from file.c and inode.c (not
+  needed now that this problem has been resolved).
+
+2.6.5 -> 2.6.7 updates:
+
+* ../../mm/filemap.c: rewrote CONFIG_EXT2_COMPRESS hunk for 2.6.7.
+
+* compress.c, file.c: use mapping_mapped(), since mapping->i_mmap has changed
+  and mapping->i_mmap_shared no longer exists.
+
+* inode.c: page->count becomes page->_count.

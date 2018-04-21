@@ -1,0 +1,511 @@
+
+  0. Introduction
+  ~~~~~~~~~~~~~~~
+
+This file gives some technical information on e2compr and how it's
+implemented.  
+
+More general information on e2compr can be found at
+http://e2compr.sourceforge.net/.
+
+The first couple of sections of this document are written for those
+who have no interest in the source code but just want to know enough
+to be able to predict and understand e2compr behaviour and its
+implications.
+
+Section 3 describes the e2compr-specific ext2 attributes for a file
+(i.e. chattr things).
+
+Section 4 describes the e2compr ioctls from the point of view of a
+user-mode C programmer.
+
+Section 5 gives more detail about the file format on disk.
+
+Section 6 gives details on what's written where, i.e. a map of e2compr
+code in the kernel.
+
+
+Authorship: section 2 is written mainly by Antoine; the remainder is
+written by Peter.
+
+Questions should be sent to the e2compr mailing list,
+e2compr-misc@lists.sourceforge.net, or to the current maintainers,
+bothie@users.sourceforge.net and whitpa@users.sourceforge.net.
+
+
+  1. The idea
+  ~~~~~~~~~~~
+
+See section `E2compr implementation' in the main e2compr texinfo
+documentation for an introduction to how e2compr works.  (Type
+`info "(e2compr)Implementation"' at the shell prompt.)  It was
+originally written as part of the file you're now reading.
+
+
+  2. More details
+  ~~~~~~~~~~~~~~~
+
+Every compressed file stores its cluster size in the inode structure
+(in the ext2 attribute flags field).
+This (the cluster size) is the most important information: when
+knowing the cluster size, we can convert a block number into a cluster
+number, get the cluster the block belongs to, and then get the block.
+The inode's flags field also keeps the algorithm that is used to compress data
+written to the file.
+
+(The algorithm that was used to compress a given
+cluster is stored in the cluster head near the beginning of the
+compressed data.  This may differ from the current algorithm
+identified in the inode, which is only used to determine which
+algorithm to use at the time clusters are written.)
+
+The algorithm id and the cluster size are stored in the i_flags field
+(thus reducing the number of possible flags).  We also create some new
+flags: the COMPRBLK flags tells if there is at least one compressed
+cluster in the file, the ECOMPR flag indicates that an error (related
+to compression) occurred while reading from or writing to this file.
+If it is set, the file becomes read-only.  (In previous releases, you
+were denied even read access to the file unless you set the NOCOMPR
+flag.  There might be some benefit in returning to the old behaviour
+if decompressing erroneous data can cause an OOPS, but I think it
+would be better to correct the decompressors.  Others may disagree,
+pointing out that it costs CPU time to check for incorrect data.)
+
+Beside the information stored into the inode, each cluster holds some
+data.  Here is the cluster_head structure for e2compr-0.4:
+
+struct ext2_cluster_head {
+  __u16 magic;		/* == EXT2_COMPRESS_MAGIC_04X. */
+  __u8  method;		/* compression method id. */
+  __u8  holemap_nbytes;	/* length of holemap[] array */
+  __u32 checksum;	/* adler32 checksum.  Checksum covers all fields
+			   below this one, and the compressed data. */
+  __u32 ulen;		/* size of uncompressed data */
+  __u32 clen;		/* size of compressed data (excluding cluster head) */
+  __u8  holemap[0];     /* bitmap describing where to put holes. */
+};
+
+The `magic' field is a magic number.  It is used to detect filesystem
+corruption, and can also be used for data recovery purposes.  (The
+e2compress program for e2compr-0.3 does this.)
+
+The `checksum' field contains an Adler-32 checksum on the fields below
+it in the struct and the compressed data.  Its purpose is to protect
+us from buffer overruns caused by corrupted data.
+
+The `ulen' field says how many bytes are stored in the cluster, when
+uncompressed.
+
+The `clen' field says how many bytes are held in the cluster, when
+compressed.
+
+The `method'
+field identifies the algorithm that was used to compress the cluster
+(this id will be used to uncompress the cluster, not the one stored
+into the inode that will be used only to compress a new cluster).
+
+The variable-length `holemap' array says where to put hole blocks when
+decompressing data.  The `holemap_nbytes' field gives the length of
+this array.  Iff holemap_nbytes is zero then there are no holes (other
+than at the end of the cluster, as determined by ulen versus cluster
+size).
+
+The compressed data immediately follows the holemap array (with no
+padding before it).
+
+
+Compressing a cluster is done in the following way:  We first get every
+block in the cluster and compute the bitmap.  We then compress the
+non-hole data, and store back the compressed data into the existing
+blocks.  Unused blocks are then freed.
+
+Decompressing a cluster is done in the following way:  We get the
+cluster head and retrieve the bitmap.  Missing blocks are allocated and
+put where the bitmap says, and then compressed data is decompressed and
+stored back into the blocks.
+
+
+Reading from a compressed cluster is really easy: get the blocks,
+decompress them into a working area, and get the bytes we want from
+the working area.  Writing to a compressed cluster is done by first
+decompressing the cluster, and then write to it, as if it were a
+normal file.  The file is then marked so that the cluster will be
+recompressed later.  [pjm: Do we decompress the cluster even if it's
+to be entirely written over?]
+
+In the current version, compression really occurs only when the inode
+is put (which in turn only occurs when no processes have the file
+open).  This may change.
+
+
+  3. Ext2 file attributes
+  ~~~~~~~~~~~~~~~~~~~~~~~
+
+Attribute     Lsattr  Meaning
+~~~~~~~~~     ~~~~~~  ~~~~~~~
+EXT2_SECRM_FL	   s  Secure deletion (not yet implemented)
+EXT2_UNRM_FL	   u  Undelete-able.  (Not yet implemented.)
+EXT2_COMPR_FL	   c  Future writes to this file should be compressed.
+                      (Clearing this flag decompresses the file if it
+		      is a regular file and there is space to do so;
+		      see the e2compr FAQ for details.)
+EXT2_SYNC_FL	   S  Synchronous updates.  (As far as I know, this is
+                      not yet fully implemented.)
+EXT2_IMMUTABLE_FL  i  Immutable file.
+EXT2_APPEND_FL	   a  Writes to file may only append.
+EXT2_NODUMP_FL	   d  Not a candidate for backup with dump(8).
+EXT2_NOATIME_FL    A  No access time updates.
+EXT2_DIRTY_FL	   Z  De/compression is yet to happen.  Read the
+                      source for exact meaning.
+EXT2_COMPRBLK_FL   B  File contains one or more compressed clusters.
+EXT2_NOCOMPR_FL    X  Access raw compressed data.  This isn't really
+		      supported at the moment; user-space access is
+		      yet to be worked out for 0.4.
+EXT2_ECOMPR_FL	   E  Compression error associated with this file
+EXT2_BTREE_FL      I  B-tree indexed directory (seemingly not yet implemented)
+EXT2_RESERVED_FL   -  (reserved for ext2 lib)
+
+See the chattr(1) man page for more verbose descriptions of the
+non-e2compr flags.
+
+
+  4. Ioctls available
+  ~~~~~~~~~~~~~~~~~~~
+
+  In brief
+  ~~~~~~~~
+
+Action             Ioctl                    To kernel	 From kernel
+~~~~~~             ~~~~~                    ~~~~~~~~~    ~~~~~~~~~~~
+Get cluster bit    EXT2_IOC_GETCLUSTERBIT   Cluster num  1 or 0 (cmp,uncmp)
+Recognize compressed                        Cluster num  -
+                   EXT2_IOC_RECOGNIZE_COMPRESSED
+Get algorithm      EXT2_IOC_GETCOMPRMETHOD  -		 Id
+Set algorithm      EXT2_IOC_SETCOMPRMETHOD  Id		 -
+Get cluster size   EXT2_IOC_GETCLUSTERSIZE  -		 Cluster size
+Set cluster size   EXT2_IOC_SETCLUSTERSIZE  Cluster size -
+Get attributes     EXT2_IOC_GETFLAGS	    -		 Flags
+Set attributes     EXT2_IOC_SETFLAGS	    Flags	 -
+Get block size     FIGETBSZ		    -		 Block size
+
+#include <linux/ext2_fs.h> to use any of these ioctls, except FIGETBSZ,
+which requires <linux/fs.h>.
+
+To find out what errors can be returned by these ioctls, read
+fs/ext2/ioctl.c (for all of the above ioctls except FIGETBSZ) or
+fs/ioctl.c (for FIGETBSZ).
+
+
+  Setting or testing a cluster bit
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+[Note: user-space access to compression details are yet to be worked out,
+so this section may not be accurate.]
+
+EXT2_IOC_GETCLUSTERBIT sets *arg to 1 if the specified cluster (0 for first
+cluster, 1 for second, etc.) is stored in compressed form.
+
+To make the kernel consider a certain cluster to be compressed (after
+you've done the compression yourself, in user space), use
+EXT2_IOC_RECOGNIZE_COMPRESSED.  This ioctl checks the validity of the
+cluster's data, then marks it as compressed (if valid).  This ioctl
+requires special priveleges, because if the compressed data is not
+valid then it may be possible to crash the system (due to buffer
+overruns).
+
+
+  Setting or getting the compression algorithm
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+EXT2_IOC_SETCOMPRMETHOD sets the default compression method (stored in
+the inode).  This is the compression method that is used for future
+writes.  In the current version of e2compr [accurate at 0.4.36], this
+does not cause a change to how
+existing clusters are stored, except when the compression method
+changes from `none' to something else, in which case the kernel
+attempts to compress ,all currently-uncompressed clusters` using the
+new algorithm.  It is an error to use this ioctl on a file without the
+compressed attribute.
+
+EXT2_IOC_GETCOMPRMETHOD sets *arg to the current compression method.
+
+In either case, Id is one of: EXT2_DEFER_METH, EXT2_LZV1_METH,
+EXT2_AUTO_METH, EXT2_NEVER_METH, EXT2_BZIP2_METH, EXT2_LZO1X_1_METH,
+EXT2_LZRW3A_METH (deprecated), EXT2_GZIP1_METH, EXT2_GZIP2_METH, ...,
+EXT2_GZIP9_METH.
+
+
+  Setting or getting the cluster size
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+EXT2_IOC_SETCLUSTERSIZE sets the cluster size to the value of *arg.
+This ioctl fails if there are already compressed clusters in the file
+(as determined by checking the EXT2_COMPRBLK_FL attribute).
+
+EXT2_IOC_GETCLUSTERSIZE sets *arg to the current cluster size.
+Surprisingly, this ioctl succeeds even if the EXT2_COMPR_FL attribute
+is clear.  (Maybe this will change in future, since the result is
+meaningless.) 
+
+In either case, the size is one of {4, 8, 16, 32}, and represents the
+number of blocks per cluster.  To convert to or from a number of
+bytes, use the FIGETBSZ ioctl.
+
+
+  Setting or getting the ext2 file attributes
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These ioctls (EXT2_IOC_GETFLAGS and EXT2_IOC_SETFLAGS) are not
+e2compr-specific, but some attributes are e2compr-specific.
+
+*arg consists of the set of attributes for that file OR'ed together.
+E.g. a value of (EXT2_COMPR_FL | EXT2_COMPRBLK_FL | EXT2_NODUMP_FL)
+for a regular file means that the file contains one or more compressed
+clusters, and should not be backed up when using dump(8).
+
+See section 3 for a description of the various attributes.
+
+Note that although the compression method and cluster size are
+physically stored in the flags field on disk this information is
+masked out (i.e. set to zero) for GETFLAGS if the kernel has e2compr compiled in.
+If the kernel does not have e2compr compiled in, then this information
+is not masked out.  See section 5 for how the cluster size and
+compression method is stored if you wish to work with ,kernels without
+e2compr`.
+
+
+  Getting the block size
+  ~~~~~~~~~~~~~~~~~~~~~~
+
+This ioctl (FIGETBSZ) is not e2compr-specific, but is useful in
+interpreting a cluster size (which is specified as a number of blocks
+rather than bytes or kilobytes).
+
+*arg is set to the block size (in bytes) of the file.  For ext2 files,
+this is one of {1024,2048,4096}.  It is the same value for all files
+on the same filesystem.
+
+You must #include <linux/fs.h> to use this ioctl (unlike the rest of
+the ioctls listed here, which require <linux/ext2_fs.h>).
+
+
+  5. File format
+  ~~~~~~~~~~~~~~
+
+A note on byte ordering.  All current versions of the kernel and
+e2compr write to disk in little-endian format, so the 16-bit number
+`0x8EC7' would be written as a 0xC7 byte followed by a 0x8E byte.
+Unless you want to know the most general rule for byte ordering, you
+can skip to the `Inode' heading.
+
+In kernel 2.0, the ext2 fs is written to disk in the native byte
+ordering.  On x86 machines, this means little endian; most other
+architectures are big-endian (so the same 16-bit number would be
+written as an 0x8E byte followed by 0xC7).
+
+On kernel 2.1 and later, the ext2 fs (including e2compr data) is
+written in little-endian order regardless of the host architecture.
+
+
+  5.1. Inode
+  ~~~~~~~~~~
+
+fs/inode.c controls the reading and writing of inode information
+to/from disk; consult this file (functions ext2_read_inode(),
+ext2_update_inode() and/or ext2_write_inode()) for any detail omitted
+from this section.
+
+The physical structure of an inode is struct ext2_inode (defined in
+include/linux/ext2_fs.h).
+
+
+The i_flags member contains the ext2 file attributes, as well as
+cluster size and compression method.  
+
+The normal flags are stored in the low 23 bits.  Only the low 12 bits
+are defined at present, including 4 flags introduced by the e2compr
+patch.  See ext2_fs.h for the flag meanings (search for
+EXT2_SECRM_FL).
+
+Bits 23 through 25 hold the cluster size, or more precisely the log2 of
+the number of filesystem blocks per cluster (excluding the first cluster;
+see ext2_first_cluster_nblocks in include/linux/ext2_fs_c.h).
+
+Bits 26 through 30 store the compression method.  See the definitions
+for EXT2_LZV1_METH etc. in ext2_fs_c.h for the interpretation.
+
+Bit 31 is reserved for ext2 lib (which means that programs like e2fsck
+store things there during its operation but it isn't used by the
+kernel).
+
+
+  Data blocks
+  ~~~~~~~~~~~
+
+Uncompressed clusters are stored just as they would be without
+e2compr.  So if there are no compressed clusters then the file
+is stored identically to any other file.
+
+
+If a cluster is compressed, then the first non-hole block starts with
+a `cluster head', as defined in struct ext2_cluster_head in ext2_fs.h.
+
+The magic number (i.e. the value of the `magic' field) is 0x8ec7.
+`method' holds one of EXT2_LZV1_ID and the like.  `reserved_0'
+contains zero.  `ubitmap' describes where the uncompressed data goes.
+(Recall that when we compress a cluster, we only compress the data
+from non-hole blocks, so we need to know where the holes and non-holes
+go when we decompress the data.)  A `0' bit means a hole and a `1' bit
+means a data block; bit 0 refers to the first block, b1 the second,
+and so on.
+
+
+The block positions within the file where the compressed data is held
+is a subset of where the uncompressed data would be held.  Further, if the
+uncompressed data occupies u non-hole blocks and this compresses to c
+blocks, then the compressed data occupies the first c non-hole blocks
+of the file (and the remainder are freed).
+
+[This paragraph is an expansion of the preceeding: if you understood
+the preceeding paragraph then skip this one.]  Consider an array
+cblock[] where cblock[0] holds the block number on disk (or 0 to
+represent a hole) of the first block of a certain cluster of a file,
+cblock[1] the second, and so on.  (If you are familiar with the bmap
+array or the format of first-level indirect blocks, then cblock[] is a
+section of that array.)  Suppose that the cluster size of this file is
+16 blocks.  Suppose too that, when uncompressed, blocks 0, 1, 5 and 6
+of the cluster are holes but the other 12 blocks (2,3,4,7,8,...,15)
+contain data.  (Thus the bitmap is 0x0000ff9c.)  Now if we compress this 
+cluster to just 5 blocks, then cblock[0], [1], [5] and [6] will continue 
+to be holes, ,the positions of the compressed data blocks` are stored in 
+cblock[2], cblock[3], [4], [7] and [8], the blocks referenced by 
+cblock[9] through cblock[15] are freed, and cblock[9] through cblock[15] 
+are set to zero.
+
+
+  6. What's coded where
+  ~~~~~~~~~~~~~~~~~~~~~
+
+File names in this section are relative to linux/fs/ext2, except for
+ext2_fs.h which is in linux/include/linux.
+
+Most of the action happens in compress.c; though note that a few
+small, commonly-used routines are written as inline functions in
+ext2_fs.h.
+
+ext2_readpage() and ext2_mmap() are in file.c.  ext2_file_write() is
+also there.
+
+Routines to read/write the inode from/to disk are in inode.c.
+
+super.c contains some e2compr initialisation code (such as allocating
+the e2compr work area).
+
+All ioctl handling is in ioctl.c.
+
+acl.c is where we deny open() access in a couple of situations (if the
+EXT2_NOCOMPR_FL is set and another process has the file open; and we
+deny write access to a file with EXT2_ECOMPR_FL set).
+
+ialloc.c contains code in ext2_new_inode() for newly-created files to
+inherit compression attributes from the directory in which they're
+created.
+
+truncate.c handles truncation, i.e. zeroing any part of the cluster
+bitmap that's been truncated, and decompressing the final cluster (but
+marking dirty so that we try to recompress it on file close) if the
+new size is part-way through a compressed cluster, so that zeroing
+over the truncated data works.
+
+linux/include/linux/ext2_fs_i.h has the definition of the
+ext2-specific parts of the in-memory inode.  (The on-disk inode is
+defined in ext2_fs.h.)
+
+linux/mm/filemap.c is also interesting, though there's no
+e2compr-specific code there.  Similarly linux/include/linux/mm.h and
+linux/include/linux/fs.h.
+
+generic_readpage() is in linux/fs/buffer.c.  Also all buffer handling.
+
+
+The cleanup scheme
+~~~~~~~~~~~~~~~~~~
+
+inode->u.ext2_i.i_compr_flags has only a single bit defined:
+EXT2_CLEANUP_FL.  This bit gets set to 1 to indicate that
+ext2_cleanup_compressed_inode() needs to be called.  
+
+There is a related flag stored on disk as well as in memory:
+EXT2_DIRTY_FL of i_flags.  If ext2_cleanup_compressed_inode() couldn't
+finish it's job (e.g. due to I/O error) then it clears EXT2_CLEANUP_FL
+of i_compr_flags, but leaves EXT2_DIRTY_FL high.
+
+In ext2_read_inode(), if EXT2_DIRTY_FL is high then EXT2_CLEANUP_FL is
+raised, in the hope that ,whatever was preventing
+ext2_cleanup_compressed_inode() from finishing` is now past.
+
+Except for ext2_read_inode() as noted above, everything that raises
+EXT2_CLEANUP_FL (i.e. ext2_write_file(), ext2_ioctl() and
+ext2_truncate()) also raises EXT2_DIRTY_FL.
+
+Nothing lowers either EXT2_CLEANUP_FL or EXT2_DIRTY_FL except
+ext2_cleanup_compressed_inode() (and one or both of new_inode and
+delete_inode routines).
+
+
+One feels that at least one of these cleanup flags ought to
+disappear.  The main use of the persistent EXT2_DIRTY_FL is where the
+user does `chattr -c' in order to decompress the file, but there isn't
+enough space on the device to do this.  We can get rid of this problem
+by having ext2_ioctl() call ext2_cleanup_compressed_inode()
+try to
+
+
+Notes on a few variables
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Don't confuse the inode->i_dirt flag with (inode->u.ext2_i.i_flags &
+EXT2_DIRTY_FL).  See section `The cleanup scheme' above for a
+description of EXT2_DIRTY_FL.
+
+
+inode->u.ext2_i.i_clu_nblocks,
+inode->u.ext2_i.i_log2_clu_nblocks:
+
+i_clu_nblocks is always equal to ,1 << i_clu_nblocks` (except during a
+couple of cycles while they're being changed; I haven't consciously
+tried to avoid problems for SMP machines in this respect).
+
+i_clu_nblocks is the number of blocks per cluster for this inode.
+
+Old information: these variables were previously called
+`i_cluster_bits' and `i_cluster_size'.  They were in an array:
+
+inode->u.ext2_i.i_cluster_bits[2], 
+inode->u.ext2_i.i_cluster_size[2]: 
+
+I believe the reason these were declared as an array was for the case
+where someone changes the cluster size of a file that was already
+compressed.  (Reason for this belief: All readers of these fields use
+[0].  On creation (ialloc), read_inode, and `chattr +c' (where
+previously uncompressed), both [0] and [1] are updated.  On change
+(IOC_SET_CLUSTERSIZE), only [0] is updated.)  Since ,changing cluster
+size of an already-compressed file` isn't implemented, I've renamed
+them and made them scalars rather than arrays.
+
+
+inode->u.ext2_i.i_flags: When the e2compr patch is applied, this
+variable only holds the low 24 bits of the on-disk i_flags field.
+(Without the e2compr patch applied, all 32 bits are available.  An
+interesting side effect of this is that user programs can access the
+compression algorithm and cluster size on kernels without e2compr
+patch by using the EXT2_IOC_GETFLAGS, EXT2_IOC_SETFLAGS ioctls.)
+
+
+inode->u.ext2_i.i_compr_method: Holds the compression method
+identifier.  Starting from e2compr-0.4.0, this is different from an
+algorithm identifier: an example of a method is gzip9; the
+corresponding algorithm is gzip.  See compress.c for where
+ext2_method_table and ext2_algorithm_table are defined.  ext2_fs.h has
+some enumerations for addressing these tables (search for
+`EXT2_NONE_METH' and `EXT2_NONE_ALG').
